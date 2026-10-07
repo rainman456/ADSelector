@@ -1,0 +1,30 @@
+# Compiled binaries
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage output
+*.test
+*.out
+coverage.*
+
+# Go tooling
+/vendor/
+
+# go.sum is NOT permanently ignored -- it simply doesn't exist yet in this
+# scaffold because `go mod tidy` has not been run.
+
+# Local environment / secrets
+.env
+.env.*
+*.local
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

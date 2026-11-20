@@ -1,0 +1,81 @@
+# k6 load test as an in-cluster Job. The k6-loadtest ConfigMap is created by
+# scripts/k8s-loadtest.sh (script file + BASE_URL/QPS/DURATION values), so the
+# Job does not need to hardcode the release name.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-loadtest
+  labels:
+    app.kubernetes.io/name: adselector-k6
+    app.kubernetes.io/component: loadtest
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: adselector-k6
+        app.kubernetes.io/component: loadtest
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 12345
+        runAsGroup: 12345
+        fsGroup: 12345
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: k6
+          image: grafana/k6:0.54.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - k6
+            - run
+            - --quiet
+            - /scripts/loadtest-k8s.js
+          env:
+            - name: HOME
+              value: /tmp
+            - name: BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: k6-loadtest
+                  key: BASE_URL
+            - name: QPS
+              valueFrom:
+                configMapKeyRef:
+                  name: k6-loadtest
+                  key: QPS
+            - name: DURATION
+              valueFrom:
+                configMapKeyRef:
+                  name: k6-loadtest
+                  key: DURATION
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: scripts
+          configMap:
+            name: k6-loadtest
+            items:
+              - key: loadtest-k8s.js
+                path: loadtest-k8s.js
+        - name: tmp
+          emptyDir: {}

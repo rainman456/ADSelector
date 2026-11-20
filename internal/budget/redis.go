@@ -81,6 +81,14 @@ func (t *RedisAtomicTracker) SetBudget(ctx context.Context, campaignID string, a
 	return t.rdb.Set(ctx, t.key(campaignID), amountMicros, t.ttl).Err()
 }
 
+// SeedIfAbsent writes the budget only when the key does not already exist.
+// It is the multi-replica-safe seeding primitive: every pod can call it at
+// startup, but the first pod's value (and any spend already applied to it)
+// is never overwritten. inserted reports whether this call created the key.
+func (t *RedisAtomicTracker) SeedIfAbsent(ctx context.Context, campaignID string, amountMicros int64) (inserted bool, err error) {
+	return t.rdb.SetNX(ctx, t.key(campaignID), amountMicros, t.ttl).Result()
+}
+
 func (t *RedisAtomicTracker) Remaining(ctx context.Context, campaignID string) (int64, error) {
 	v, err := t.rdb.Get(ctx, t.key(campaignID)).Int64()
 	if err == redis.Nil {

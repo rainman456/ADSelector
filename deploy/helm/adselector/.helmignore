@@ -1,0 +1,7 @@
+# Files outside the chart that should never be packaged.
+.git/
+.gitignore
+.helmignore
+ci/
+*.tmp
+*.swp

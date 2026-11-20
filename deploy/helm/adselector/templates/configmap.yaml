@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "adselector.fullname" . }}
+  labels:
+    {{- include "adselector.labels" . | nindent 4 }}
+data:
+  LISTEN_ADDR: {{ .Values.config.listenAddr | quote }}
+  BUDGET_BACKEND: {{ .Values.config.budgetBackend | quote }}
+  BUDGET_SEED: {{ .Values.config.budgetSeed | quote }}
+  FREQCAP_BACKEND: {{ .Values.config.freqCapBackend | quote }}
+  REDIS_ADDR: {{ include "adselector.redisAddr" . | quote }}
+  KAFKA_ENABLED: {{ .Values.config.kafkaEnabled | quote }}
+  KAFKA_BROKER: {{ include "adselector.kafkaBroker" . | quote }}
+  KAFKA_TOPIC: {{ .Values.config.kafkaTopic | quote }}

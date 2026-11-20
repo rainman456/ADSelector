@@ -1,18 +1,23 @@
-# NOTE: this Dockerfile has not been built or tested as part of scaffolding
-# this project. It is written to produce a correct image once `go mod
-# tidy` has been run locally (so go.sum exists) -- see repo README.
+# Build the API only. The analytics consumer has its own Dockerfile.
+# `go mod tidy` must have produced go.sum before building; see docs/verify.md.
 
 FROM golang:1.24-bookworm AS build
 WORKDIR /src
 
+ARG VERSION=dev
+
 COPY go.mod ./
-# go.sum intentionally not copied here -- it does not exist yet because
-# `go mod tidy` has not been run against this module.
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/adselector ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/adselector ./cmd/server
 
-FROM gcr.io/distroless/static-debian12
+# static-debian12:nonroot already defines uid/gid 65532; the explicit USER
+# keeps the non-root contract even if the base tag is changed.
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/adselector /adselector
+USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/adselector"]

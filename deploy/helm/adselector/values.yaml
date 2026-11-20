@@ -1,0 +1,150 @@
+# Default values for adselector.
+# The chart defaults to 2 API replicas with a shared Redis subchart and
+# Kafka disabled, so the budget invariant holds across pods out of the box.
+# See docs/adr/0003-kubernetes-deployment-shape.md.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/michaelstone897/adselector
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+config:
+  listenAddr: ":8080"
+  # Redis is the correct backend for replicaCount > 1. A memory backend has
+  # one independent counter per pod and is intended for single-replica demos.
+  budgetBackend: redis
+  # init = seed only missing budget keys (safe with multiple pods).
+  # reset = overwrite every budget key at startup (single-replica/legacy).
+  budgetSeed: init
+  freqCapBackend: redis
+  kafkaEnabled: false
+  kafkaTopic: impression_served
+
+# Point at managed services instead of the subcharts. When set, these win
+# over the subchart-derived addresses.
+external:
+  redisAddr: ""
+  kafkaBroker: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+livenessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+pdb:
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# --- Dependency: Redis (Bitnami chart 20.1.7) -----------------------------
+# Local defaults: standalone, authentication disabled, no persistence.
+# Production should use a managed Redis or set auth + persistence.
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+    pdb:
+      create: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+
+# --- Dependency: Redpanda (chart 5.7.19) ----------------------------------
+# Disabled by default. Enabling requires config.kafkaEnabled=true as well.
+kafka:
+  enabled: false
+  statefulset:
+    replicas: 1
+    initContainerImage:
+      repository: busybox
+      tag: "1.36.1"
+  resources:
+    cpu:
+      cores: 1
+    memory:
+      container:
+        max: 1Gi
+  storage:
+    persistentVolume:
+      enabled: false
+  tls:
+    enabled: false
+  auth:
+    sasl:
+      enabled: false
+  console:
+    enabled: false
+  external:
+    enabled: false
+    service:
+      enabled: false
+  tuning:
+    tune_aio_events: false

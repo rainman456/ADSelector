@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,12 +30,18 @@ import (
 	"github.com/michaelstone897/adselector/internal/selector"
 )
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 type config struct {
 	ListenAddr string
 	RedisAddr  string
 
 	KafkaBrokers []string
 	KafkaTopic   string
+	// KafkaEnabled controls whether a real Kafka writer is constructed. When
+	// false, events.NoopPublisher is used so no broker dial is attempted.
+	KafkaEnabled bool
 
 	// BudgetBackend selects which budget.BudgetEnforcer implementation
 	// serves real traffic: "memory" (default, InMemoryAtomicTracker) or
@@ -45,6 +53,13 @@ type config struct {
 	// FreqCapBackend selects the freqcap.FrequencyCapper implementation:
 	// "redis" (default) or "noop" (for local dev without Redis running).
 	FreqCapBackend string
+
+	// BudgetSeedMode controls startup seeding when BUDGET_BACKEND=redis:
+	// "reset" (default, preserves the original behavior) overwrites the
+	// Redis budget key, while "init" only writes it when the key is absent.
+	// Multi-replica deployments must use "init" so a new pod does not reset
+	// spend already recorded by its peers.
+	BudgetSeedMode string
 }
 
 func loadConfigFromEnv() config {
@@ -53,9 +68,23 @@ func loadConfigFromEnv() config {
 		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
 		KafkaBrokers:   []string{getEnv("KAFKA_BROKER", "localhost:9092")},
 		KafkaTopic:     getEnv("KAFKA_TOPIC", "impression_served"),
+		KafkaEnabled:   getEnvBool("KAFKA_ENABLED", true),
 		BudgetBackend:  getEnv("BUDGET_BACKEND", "memory"),
 		FreqCapBackend: getEnv("FREQCAP_BACKEND", "redis"),
+		BudgetSeedMode: getEnv("BUDGET_SEED", "reset"),
 	}
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }
 
 func getEnv(key, fallback string) string {
@@ -71,6 +100,12 @@ func main() {
 
 	cfg := loadConfigFromEnv()
 	ctx := context.Background()
+	logger.Info("adselector starting",
+		"version", version,
+		"kafka_enabled", cfg.KafkaEnabled,
+		"budget_backend", cfg.BudgetBackend,
+		"budget_seed", cfg.BudgetSeedMode,
+		"freqcap_backend", cfg.FreqCapBackend)
 
 	// --- Campaign store (in-memory for v1; see internal/campaign.Store's
 	// doc comment for how a Postgres-backed implementation would slot in
@@ -100,7 +135,14 @@ func main() {
 	switch cfg.BudgetBackend {
 	case "redis":
 		tracker := budget.NewRedisAtomicTracker(rdb, "budget")
+		seedIfAbsent := strings.EqualFold(cfg.BudgetSeedMode, "init")
 		for _, c := range allCampaigns {
+			if seedIfAbsent {
+				if _, err := tracker.SeedIfAbsent(ctx, c.ID, c.DailyBudgetMicros); err != nil {
+					logger.Error("failed to seed redis budget if absent", "campaign_id", c.ID, "err", err)
+				}
+				continue
+			}
 			if err := tracker.SetBudget(ctx, c.ID, c.DailyBudgetMicros); err != nil {
 				logger.Error("failed to seed redis budget", "campaign_id", c.ID, "err", err)
 			}
@@ -129,10 +171,17 @@ func main() {
 	}
 
 	// --- Event publishing (fire-and-forget; see internal/events doc comment).
-	publisher := events.NewKafkaPublisher(events.KafkaConfig{
-		Brokers: cfg.KafkaBrokers,
-		Topic:   cfg.KafkaTopic,
-	}, logger)
+	// KAFKA_ENABLED=false preserves the HTTP path but avoids dialing a broker
+	// that is not part of the deployment (the chart default).
+	var publisher events.Publisher
+	if cfg.KafkaEnabled {
+		publisher = events.NewKafkaPublisher(events.KafkaConfig{
+			Brokers: cfg.KafkaBrokers,
+			Topic:   cfg.KafkaTopic,
+		}, logger)
+	} else {
+		publisher = events.NewNoopPublisher()
+	}
 	defer publisher.Close()
 
 	// --- Metrics.
@@ -169,6 +218,7 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "err", err)
 	}
+	logger.Info("shutdown complete")
 }
 
 // seedCampaigns populates the in-memory store with a handful of sample

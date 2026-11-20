@@ -1,0 +1,132 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24"
+  HELM_VERSION: "v3.16.2"
+  KUBECONFORM_IMAGE: "ghcr.io/yannh/kubeconform:v0.6.7"
+
+jobs:
+  lint:
+    name: helm lint and kubeconform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.1.7
+      - uses: azure/setup-helm@v4.2.0
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Build chart dependencies
+        run: helm dependency build deploy/helm/adselector
+      - name: helm lint
+        run: helm lint deploy/helm/adselector
+      - name: helm template (redis on, kafka off)
+        run: |
+          helm template adselector deploy/helm/adselector \
+            --set redis.enabled=true --set kafka.enabled=false \
+            | docker run --rm -i "$KUBECONFORM_IMAGE" \
+                -strict -ignore-missing-schemas -summary -
+      - name: helm template (redis off, kafka on)
+        run: |
+          helm template adselector deploy/helm/adselector \
+            --set redis.enabled=false --set kafka.enabled=true \
+            --set config.kafkaEnabled=true \
+            | docker run --rm -i "$KUBECONFORM_IMAGE" \
+                -strict -ignore-missing-schemas -summary -
+
+  go:
+    name: go build, vet, test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.1.7
+      - uses: actions/setup-go@v5.0.4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Resolve dependencies
+        run: go mod tidy
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Race test the budget package
+        run: go test -race -count=5 ./internal/budget/...
+      - name: Analytics build and vet
+        working-directory: analytics
+        run: |
+          go mod tidy
+          go build ./...
+          go vet ./...
+
+  kind:
+    name: kind smoke and budget invariant
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    needs: [lint, go]
+    steps:
+      - uses: actions/checkout@v4.1.7
+      - uses: actions/setup-go@v5.0.4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: azure/setup-helm@v4.2.0
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: adselector-ci
+      - name: Install metrics-server (kind)
+        run: kubectl apply -f deploy/k8s/metrics-server-kind.yaml
+      - name: Resolve dependencies
+        run: go mod tidy
+      - name: Build image
+        run: docker build --build-arg VERSION=ci -t adselector:ci .
+      - name: Load image
+        run: kind load docker-image adselector:ci --name adselector-ci
+      - name: Install chart
+        run: |
+          helm dependency build deploy/helm/adselector
+          helm --kube-context kind-adselector-ci upgrade --install adselector \
+            deploy/helm/adselector \
+            --namespace adselector --create-namespace \
+            --set image.repository=adselector \
+            --set image.tag=ci \
+            --set redis.enabled=true \
+            --set kafka.enabled=false \
+            --wait --timeout 5m
+      - name: Wait for rollout
+        run: |
+          deploy=$(kubectl --context kind-adselector-ci -n adselector get deploy \
+            -l app.kubernetes.io/instance=adselector,app.kubernetes.io/name=adselector \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl --context kind-adselector-ci -n adselector rollout status "deployment/$deploy" --timeout=180s
+      - name: Smoke test through port-forward
+        run: |
+          set -euo pipefail
+          kubectl --context kind-adselector-ci -n adselector port-forward svc/adselector 18080:80 \
+            >/tmp/adselector-port-forward.log 2>&1 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:18080/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          BASE_URL=http://127.0.0.1:18080 bash scripts/k8s-smoke.sh
+      - name: Budget invariant across 2 replicas
+        run: |
+          KUBE_CONTEXT=kind-adselector-ci \
+          NAMESPACE=adselector \
+          RELEASE=adselector \
+          REPLICAS=2 \
+          QPS=50 \
+          DURATION=15s \
+          bash scripts/k8s-loadtest.sh

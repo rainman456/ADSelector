@@ -1,13 +1,13 @@
-# NOTE: this compose file has not been run or tested as part of
-# scaffolding this project (see the CRITICAL CONSTRAINTS in the repo
-# README -- no build/run/test commands have been executed). Images,
-# ports, and env vars below are believed correct but unverified.
+# Local dev stack. For analytics, see the "analytics" profile at the bottom
+# and docs/analytics.md. Run `go mod tidy` before `docker compose build`.
 
 services:
   adselector:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        VERSION: "0.1.0"
     ports:
       - "8080:8080"
     environment:
@@ -15,24 +15,33 @@ services:
       REDIS_ADDR: "redis:6379"
       KAFKA_BROKER: "kafka:9092"
       KAFKA_TOPIC: "impression_served"
+      KAFKA_ENABLED: "true"
       # "memory" demos in-process CAS-loop correctness (single replica);
       # switch to "redis" to demo the distributed Lua-script path across
       # multiple adselector replicas sharing one Redis instance.
       BUDGET_BACKEND: "memory"
+      BUDGET_SEED: "reset"
       FREQCAP_BACKEND: "redis"
     depends_on:
-      - redis
-      - kafka
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.1-alpine
     ports:
       - "6379:6379"
     command: ["redis-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   # Single-node Kafka in KRaft mode -- no separate Zookeeper service needed.
   kafka:
-    image: bitnami/kafka:3.7
+    image: bitnami/kafka:3.7.0
     ports:
       - "9092:9092"
     environment:
@@ -44,3 +53,47 @@ services:
       KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
       KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
       ALLOW_PLAINTEXT_LISTENER: "yes"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # Optional analytics profile: ClickHouse + the companion consumer.
+  #   docker compose --profile analytics up -d
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.8.10
+    profiles: ["analytics"]
+    environment:
+      CLICKHOUSE_DB: "adselector"
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - ./analytics/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  analytics:
+    profiles: ["analytics"]
+    build:
+      context: ./analytics
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      LISTEN_ADDR: ":8081"
+      KAFKA_BROKER: "kafka:9092"
+      KAFKA_TOPIC: "impression_served"
+      KAFKA_GROUP: "adselector-analytics"
+      CLICKHOUSE_ADDR: "clickhouse:9000"
+      CLICKHOUSE_DB: "adselector"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: ""
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped

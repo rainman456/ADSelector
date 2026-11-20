@@ -1,0 +1,18 @@
+apiVersion: v2
+name: adselector
+description: AdSelector ad-decisioning API with optional Redis and single-node Redpanda dependencies.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+dependencies:
+  - name: redis
+    version: 20.1.7
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+    alias: redis
+  - name: redpanda
+    version: 5.7.19
+    repository: https://charts.redpanda.com
+    condition: kafka.enabled
+    alias: kafka

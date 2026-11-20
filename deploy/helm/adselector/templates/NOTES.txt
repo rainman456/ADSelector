@@ -1,0 +1,25 @@
+1. Watch the rollout (one pod at a time; the PDB keeps one API pod available):
+   kubectl --namespace {{ .Release.Namespace }} rollout status deployment/{{ include "adselector.fullname" . }}
+
+2. From your machine:
+   kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "adselector.fullname" . }} 18080:{{ .Values.service.port }}
+   curl -s http://127.0.0.1:18080/healthz
+
+3. Send a selection:
+   curl -s -X POST http://127.0.0.1:18080/v1/select \
+     -H 'Content-Type: application/json' \
+     -d '{"user_id":"u1","ad_slot_id":"slot-homepage-top","geo":"US","device":"mobile"}'
+
+Configuration in this release:
+- BUDGET_BACKEND={{ .Values.config.budgetBackend }}  BUDGET_SEED={{ .Values.config.budgetSeed }}
+- FREQCAP_BACKEND={{ .Values.config.freqCapBackend }}
+- Redis address: {{ include "adselector.redisAddr" . | default "(none)" }}
+- Kafka enabled: {{ .Values.config.kafkaEnabled }}  topic: {{ .Values.config.kafkaTopic }}
+
+Kafka is off by default. To enable the bundled single-broker Redpanda:
+  --set kafka.enabled=true --set config.kafkaEnabled=true
+The first start creates the topic on first publish (auto-create must be on);
+create it explicitly for production.
+
+Graceful shutdown: 30s pod termination grace, 10s in-process HTTP drain.
+The distroless image has no shell, so no preStop hook is used.
